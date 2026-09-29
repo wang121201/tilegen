@@ -6,6 +6,7 @@
 #include "cycle_overlap.h"
 #include "scheduler_observer.h"
 #include "l2_event_audit.h"
+#include "../source_root.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -13,7 +14,7 @@
 namespace native_sequence {
 void keys(const J& j,std::initializer_list<const char*> fields){p::need(j.is_object()&&j.size()==fields.size(),"unexpected or missing sequence field; per-kernel memory/map/reset override forbidden");for(auto key:fields)p::need(j.contains(key),"required sequence field missing");}
 std::string read_bounded(const std::string& name,U cap){namespace fs=std::filesystem;p::need(fs::is_regular_file(name)&&!fs::is_symlink(name)&&fs::file_size(name)<=cap,"bounded regular non-symlink input required");std::ifstream f(name,std::ios::binary);p::need(bool(f),"input open");std::string text;std::array<char,8192> b{};while(f){f.read(b.data(),b.size());text.append(b.data(),f.gcount());p::need(text.size()<=cap,"file grew beyond bound");}return text;}
-std::string check_pin(const J& pin){keys(pin,{"path","bytes","sha256"});const U n=p::natural(pin.at("bytes"),64U<<20);auto s=read_bounded(pin.at("path").get<std::string>(),64U<<20);p::need(s.size()==n&&tiny_sha::sha256(s)==pin.at("sha256").get<std::string>(),"source input pin changed");return s;}
+std::string check_pin(const J& pin){keys(pin,{"path","bytes","sha256"});const U n=p::natural(pin.at("bytes"),64U<<20);auto s=read_bounded(tilegen_source::resolve(pin.at("path").get<std::string>()),64U<<20);p::need(s.size()==n&&tiny_sha::sha256(s)==pin.at("sha256").get<std::string>(),"source input pin changed");return s;}
 J process_identity(const J& program){const auto& b=program.at("source").at("native_binding");const auto& key=b.at("source_launch_key");const auto pid=p::natural(b.at("source_process_id")),ticks=p::natural(b.at("source_start_ticks"));p::need(pid&&ticks&&p::natural(key.at("pid"))==pid&&p::natural(key.at("start_ticks"))==ticks,"process PID/start_ticks binding");const auto spec=program.at("experiment_spec_sha256").get<std::string>();p::need(spec.size()==64,"experiment spec SHA required");p::need(program.at("source").at("begin").at("stream_u64")==b.at("stream_u64"),"BEGIN/native stream mismatch");return {{"pid",pid},{"start_ticks",ticks},{"experiment_spec_sha256",spec},{"context_id",b.at("context_id")},{"context_handle_u64",b.at("context_handle_u64")},{"stream_u64",b.at("stream_u64")}};}
 struct SourceBundle {const J input;p::Program program;native_register::Program registers;const native_range_plan::Plan range_plan;U executed;int resident;J identity,budget;g::CtaGraphStore::Limits limits;
  SourceBundle(J value,bool fixture):input(std::move(value)),program(input.at("program")),registers(input.at("register_program"),program,fixture),range_plan(program){const auto& j=input;const bool eager=false;keys(j,{"program","register_program","program_file","register_file","prefix_ctas"});const auto& m=j.at("program");const auto& r=j.at("register_program");const auto& begin=m.at("source").at("begin");p::need(r.at("source_begin")==begin,"exact same-process compute/memory BEGIN");identity=process_identity(m);auto prefix=p::natural(j.at("prefix_ctas"),program.ctas);p::need(prefix==0||prefix<program.ctas,"prefix must be strict partial grid");executed=prefix?prefix:program.ctas;

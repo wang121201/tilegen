@@ -78,16 +78,25 @@ public:
         length+=size;
         if(!size)return;
         auto p=static_cast<const unsigned char*>(data);
-        if(used){const auto take=std::min(size,b.size()-used);std::memcpy(b.data()+used,p,take);used+=take;p+=take;size-=take;if(used==64){block();used=0;}}
-        while(size>=64){std::memcpy(b.data(),p,64);block();p+=64;size-=64;}
+        if(used){
+            need(used<b.size(),"partial hash block invariant");
+            const auto available=b.size()-used;
+            if(size<available){std::memcpy(b.data()+used,p,size);used+=size;return;}
+            std::memcpy(b.data()+used,p,available);p+=available;size-=available;block();used=0;
+        }
+        while(size>=b.size()){std::memcpy(b.data(),p,b.size());block();p+=b.size();size-=b.size();}
         if(size){std::memcpy(b.data(),p,size);used=size;}
     }
     void add(const std::string& s){add(s.data(),s.size());}
     U bytes()const{return length;}
     std::string hex()const{
         auto q=*this;need(length<=UINT64_MAX/8,"hash bit count overflow");U bits=length*8;
-        q.b[q.used++]=0x80;if(q.used>56){while(q.used<64)q.b[q.used++]=0;q.block();q.used=0;}
-        while(q.used<56)q.b[q.used++]=0;for(int i=7;i>=0;--i)q.b[q.used++]=static_cast<unsigned char>(bits>>(i*8));q.block();
+        need(q.used<q.b.size(),"final hash block invariant");
+        q.b[q.used++]=0x80;
+        if(q.used>56){while(q.used<q.b.size())q.b[q.used++]=0;q.block();q.used=0;}
+        while(q.used<56)q.b[q.used++]=0;
+        for(int i=7;i>=0;--i)q.b[q.used++]=static_cast<unsigned char>(bits>>(i*8));
+        q.block();
         std::ostringstream out;out<<std::hex<<std::setfill('0');for(auto word:q.h)out<<std::setw(8)<<word;return out.str();
     }
 };

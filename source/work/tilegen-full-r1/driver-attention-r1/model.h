@@ -1,13 +1,14 @@
 #pragma once
 #include <fstream>
 #include "phase_seals.h"
+#include "../source_root.h"
 namespace attention_bridge {
 using namespace prefill_gemm;
 struct Profile {std::string name;int grid=8,shared=0,regs=0,resident=0,pcmax=0;std::array<int,4>perwarp{},memcounts{};U nodes=0,read=0,write=0,copies=0,zero=0,tensors=0,ranges=0;};
 struct Object {std::string role,logical;U pointer;std::vector<std::pair<U,U>>windows,lines;};
 struct Node:prefill_gemm::Node {int memordinal=-1;bool transpose_footprint_only=false,private_tail=false;};
 struct Record {int pc;std::string opcode,op;U width,effective,source_mask;std::vector<Global>lanes;};
-J read_pin(const J&q,U cap){std::ifstream f(q.at("path").get<std::string>(),std::ios::binary);need(bool(f),"pinned plan file");std::string b((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());need(b.size()==integer(q.at("bytes"),cap)&&tiny_sha::sha256(b)==q.at("sha256").get<std::string>(),"pinned plan SHA/size");return J::parse(b);}
+J read_pin(const J&q,U cap){std::ifstream f(tilegen_source::resolve(q.at("path").get<std::string>()),std::ios::binary);need(bool(f),"pinned plan file");std::string b((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());need(b.size()==integer(q.at("bytes"),cap)&&tiny_sha::sha256(b)==q.at("sha256").get<std::string>(),"pinned plan SHA/size");return J::parse(b);}
 struct Model {
  Profile p;int ctas;U live_nodes=0,live_ranges=0,ranges=0,read=0,write=0,shared_read=0,shared_write=0,copies=0,zero_copies=0,tensors=0,copy_lines=0,read_lines=0,write_lines=0;
  std::vector<Node>nodes;std::vector<Object>objects;std::array<std::array<std::vector<Record>,4>,8>memory;std::vector<g::CtaGraphStore::Span>spans;J profile,entry;

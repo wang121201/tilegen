@@ -1,6 +1,7 @@
 #pragma once
 #include "backend.h"
 #include "simulator_session.h"
+#include "../../tilegen-full-r1/source_root.h"
 #include <nlohmann/json.hpp>
 namespace coupling {
 using J=nlohmann::json;using U=std::uint64_t;namespace g=GTSim;
@@ -204,7 +205,8 @@ struct Runtime {
         const auto mode=profile.at("backend").get<std::string>();
         need(mode=="internal"||mode=="hbf_gddr6","only internal or native hbf_gddr6 is supported; old surrogate is excluded");
         need(profile.at("hbm_timing_scale").get<double>()==1.0,"native cfg cannot be silently timing-rescaled");
-        const auto path=profile.at("native_hbfsim_config_file").get<std::string>();
+        const auto logical_path=profile.at("native_hbfsim_config_file").get<std::string>();
+        const auto path=tilegen_source::resolve(logical_path);
         const auto native=sg_hbf::native_config_file(path);
         match_reference(profile.at("gddr6"),native);
         device_identity=native_identity(native,path);
