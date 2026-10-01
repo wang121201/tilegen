@@ -2,6 +2,8 @@
 #include "work/tilegen-full-r1/driver-pooled-fusednorm-r1/streaming.cpp"
 #undef main
 #include "work/tilegen-tiny-full-r1/import.h"
+#include "work/tilegen-tiny-full-r1/reporting.h"
+#include "work/tilegen-hybrid-full-r1/fine_context.h"
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -70,7 +72,18 @@ public:
     U first_node(U cta) const override {need(cta==0,"CTA range");return 0;}
     std::span<const SourceNode> nodes(U cta) const override {need(cta==0,"CTA range");return nodes_;}
     U template_class(U cta) const override {need(cta==0,"CTA range");return 0;}
-    MemoryDescriptor memory(U cta,unsigned member) const override {need(cta==0&&member<nodes_.size(),"memory descriptor range");const auto& node=nodes_.at(member);need(node.kind==Kind::Global||node.kind==Kind::Shared,"not a memory node");MemoryDescriptor descriptor;descriptor.write=node.write;descriptor.path=node.kind==Kind::Global?tiny_full::Path::DirectGlobal:tiny_full::Path::Shared;return descriptor;}
+    MemoryDescriptor memory(U cta,unsigned member) const override {
+        need(cta==0&&member<nodes_.size(),"memory descriptor range");const auto& node=nodes_.at(member);
+        need(node.kind==Kind::Global||node.kind==Kind::Shared,"not a memory node");MemoryDescriptor descriptor;descriptor.write=node.write;
+        descriptor.path=node.kind==Kind::Global?tiny_full::Path::DirectGlobal:tiny_full::Path::Shared;
+        if(node.kind==Kind::Global) {
+            const U offset=(U(node.id)+1)*128;descriptor.global_bytes=128;
+            descriptor.lines.push_back(g::CacheLineKey{1,offset});g::ExplicitMemorySubop sub;
+            sub.modeled_member_start=int(node.id);sub.source_member_ordinals.push_back(int(node.id));sub.requested_bytes=128;
+            sub.ranges.push_back({int(node.id),offset,128});descriptor.global_subops.push_back(std::move(sub));
+        }
+        return descriptor;
+    }
     J evidence() const override {return evidence_;}
 };
 
@@ -85,5 +98,45 @@ int run(const char* path) {
     for(std::size_t index=0;index<kernels.size();++index) {const auto& kernel=kernels.at(index);need(p::natural(kernel.at("kernel_id"))==index,"dense kernel id");need(programs.contains(kernel.at("template_id").get<std::string>()),"kernel template exists");for(const char* field:{"data_dependencies","order_dependencies"}) for(const auto& dep:kernel.at(field))need(p::natural(dep)<index,"kernel dependency is backward");++phases[kernel.at("phase").get<std::string>()];}
     need(phases==std::map<std::string,U>{{"decode_1",321},{"decode_2",321},{"prefill",388}},"phase kernel census");std::cout<<J({{"schema","TILEGEN_TILEGRAPH_INPUT_CHECK_V1"},{"status","PASS_TILEGEN_ACCEPTS_TILEGRAPH_INPUT"},{"kernels",kernels.size()},{"templates",templates.size()},{"template_expanded_nodes",expanded_nodes},{"trace_used",false},{"hardware_calibration_used",false},{"HBFSIM_executed",false},{"GPU_executed",false}}).dump()<<'\n';return 0;
 }
+
+int run_full(const char* graph_path,const char* control_path) {
+    const J graph=read_json(graph_path),control=read_json(control_path);
+    need(graph.at("schema")=="TILEGEN_TILELANG_TILEGRAPH_INPUT_V1"&&graph.at("kernels").size()==1030,"full TileGraph contract");
+    need(control.contains("memory_model")&&control.contains("service_address_map"),"full run memory control");
+    std::map<std::string,const J*> templates;for(const auto& item:graph.at("templates"))templates.emplace(item.at("template_id").get<std::string>(),&item);
+    std::map<std::string,std::shared_ptr<Binding>> bindings;
+    for(const auto& item:templates)bindings.emplace(item.first,std::make_shared<Binding>(*item.second));
+    auto cfg=GTSim::make_rtx4000_ada_footprint_reference_config();cfg.silence_mode=true;cfg.workload_type=g::WorkloadType::Llama3Elementwise;
+    native_sequence::Mapper source_mapper;coupling::Runtime memory(control,cfg,source_mapper);need(bool(memory.backend),"full run requires native HBF backend");
+    auto l2=tiny_full::make_l2(cfg,memory);g::Cycle cycle=0;hybrid_full::FineContext session(cfg,*l2,cycle);
+    U total_read=0,total_write=0,total_nodes=0;const auto started=std::chrono::steady_clock::now();
+    for(std::size_t index=0;index<graph.at("kernels").size();++index) {
+        const auto& kernel=graph.at("kernels").at(index);const auto& binding=*bindings.at(kernel.at("template_id").get<std::string>());g::DAG dag;
+        const auto nodes=binding.nodes(0);std::vector<std::unique_ptr<g::DAGNode>> owners;owners.reserve(nodes.size());
+        for(const auto& source:nodes) {
+            std::vector<int> completion;for(const auto dep:source.completion_dependencies)completion.push_back(int(dep));
+            std::string pipeline=source.pipeline,op="compute";int elements=int(source.compute_elements);g::DataType dtype=g::DataType::FP16;
+            if(source.kind==Kind::Global){pipeline=source.write?"ST":"LD";op=source.write?"st.reg2dram":"ld.dram2reg";elements=128;}
+            else if(source.kind==Kind::Tensor){pipeline="Tensor";op="mma";elements=16384;}
+            else if(source.kind==Kind::Control){pipeline="SIMD";op="compute";elements=1;}
+            else if(source.kind==Kind::Barrier){pipeline="BARRIER";op="barrier";elements=1;}
+            g::Tile tile(0,0,1,std::max(1,elements));auto node=std::make_unique<g::DAGNode>(int(source.id),"tilegraph-n"+std::to_string(source.id),pipeline,op,
+                g::cta_placement::token(0,source.warp,binding.warps(0),cfg.num_sms,4,true),completion,0,tile,dtype);
+            node->sm_id=0;node->thread_block_id=0;node->compiler_cta_id=0;node->source_ordinal=int(source.source_ordinal);
+            for(const auto dep:source.issue_dependencies)node->issue_depends_on.push_back(int(dep));
+            if(source.kind==Kind::Global){const auto descriptor=binding.memory(0,source.id);node->matrix_id=1;node->memory_access_granularity_bytes=1;node->memory_coalesce_bytes=128;node->explicit_memory_subops=descriptor.global_subops;}
+            if(source.kind==Kind::Tensor)node->declare_tensor_fma_work(int(source.tensor_fma/16384));
+            dag.add_node(node.release());
+        }
+        dag.build_dependency_graph();auto result=session.run_kernel(&dag,g::Cycle(2000000000),false,nullptr,nullptr,g::Cycle(10000000));
+        total_nodes+=nodes.size();for(const auto& source:nodes)if(source.kind==Kind::Global){const auto d=binding.memory(0,source.id);if(source.write)total_write+=d.global_bytes;else total_read+=d.global_bytes;}
+        if((index+1)%10==0)std::cerr<<J({{"progress_completed_kernels",index+1},{"total_kernels",graph.at("kernels").size()},{"cycle",cycle},{"kernel_cycles",result.kernel_end_cycle-result.start_cycle}}).dump()<<'\n';
+    }
+    need(l2->is_quiescent(),"full TileGraph run left L2 non-quiescent");memory.backend->finalize();const auto physical=memory.backend->physical_statistics();const auto admission=memory.backend->admission_statistics();
+    std::cout<<J({{"schema","TILEGEN_TILEGRAPH_FULL_RESULT_V1"},{"status","PASS_TILEGEN_HBFSIM_FULL_1030"},{"kernels",1030},{"nodes",total_nodes},
+        {"cycle",cycle},{"logical_read_bytes",total_read},{"logical_write_bytes",total_write},{"physical_read_bytes",physical.read_bytes},{"physical_write_bytes",physical.write_bytes},
+        {"admitted_requests",admission.accepted},{"completed_requests",admission.completed},{"peak_live",admission.peak_live},{"trace_used",false},{"hardware_calibration_used",false},
+        {"GPU_executed",false},{"HBFSIM_executed",true},{"host_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count()}}).dump()<<'\n';return 0;
+}
 } // namespace tg_input
-int main(int argc,char** argv) {try {if(argc!=2)throw std::runtime_error("usage: tilegraph_input_check TILEGRAPH.json");return tg_input::run(argv[1]);}catch(const std::exception& error) {std::cerr<<nlohmann::json({{"status","REJECTED"},{"reason",error.what()}}).dump()<<'\n';return 2;}}
+int main(int argc,char** argv) {try {if(argc==2)return tg_input::run(argv[1]);if(argc==4&&std::string(argv[1])=="--full")return tg_input::run_full(argv[2],argv[3]);throw std::runtime_error("usage: tilegraph_input_check TILEGRAPH.json | tilegraph_input_check --full TILEGRAPH.json MEMORY_CONTROL.json");}catch(const std::exception& error) {std::cerr<<nlohmann::json({{"status","REJECTED"},{"reason",error.what()}}).dump()<<'\n';return 2;}}
