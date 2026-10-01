@@ -9,6 +9,8 @@
 
 请先读 [ProgramGraph 功能流量工作流、证据和 32 B 状态](docs/programgraph-functional-workflow.md)。其中给出了项目组织、可复现门禁、与 pure GTSim 的简化边界，以及 P64D2 的历史硬件对照。本文后续内容是历史 native-trace / HBFSim 融合记录，**不是本分支当前 Qwen ProgramGraph 的运行指南**。
 
+分支、历史 R4 实验归档、两份 P/D 扫描报告的来源，以及新 branch 的准入政策，见 [Qwen / R4 / TileGraph 开发谱系](docs/development-lineage.md)。
+
 下文保留历史融合分支记录。
 
 最新衔接：GEMV、SiLU 的 direct binding 与精确 cosim Builder 已共用 cache 前 `PreparedMemory`，并减少等价 CTA 校验的主机分配。三组配对测试中引擎执行窗口为 **1.08×**，完整子进程 CPU 时间基本持平；不能据此声称端到端明显提速。实现、验收和范围见 [共享前端报告](docs/shared-frontend.md)。
