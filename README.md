@@ -1,14 +1,15 @@
-# TileGen 原生 trace / HBFSIM 融合分支
+# TileGen：当前工作流入口
 
-当前独立分支新增 **r4 串行读缓存候选**：`ada_r4.py` 使用共享 GTSim L1 回放冻结请求，比较 r2 LRU 与 r4 CLOCK/hash2。它只验证 L2 读入口 sector，r2 默认和旧 direct/cosim 配置保持原样；见 [r4 参数、运行及验证边界](docs/ada-r4-serial.md)。下文保留历史融合分支记录。
+此 worktree 是 `codex/qwen15-tilegraph-cosim-20261001`。它保留两条**不能混同**的路径：
 
-分支：`codex/tilegen-trace-cosim-20260918-r1`。B8 合并暂停，本分支固定 B1。
+1. **ProgramGraph 功能流量路径（当前用于固定 P/D 的稳定路径）**：`ProgramGraph → provider.events() effect stream → FunctionalCache → counters / optional post-cache trace`。
+2. **TileGraph 细粒度路径（pure GTSim 语义）**：`TileGraph → CTA/warp/tile dependency execution → L1/L2 → optional memory completion feedback`。
 
-当前缓存结构档为 `TILEGEN_PAPER_ADA_GEOMETRY_R1`：三个入口共用 L1 **32 KiB/SM、64 ways、4 sets、128 B line、store bypass、kernel-flush**；L2 **40 MiB、20 logical slices ×1024 sets ×16 ways、128 B line、32 B dirty**，使用封存 PAPER_ADA 的 quotient/XOR 索引和组内 LRU。完整配置写入每次结果的 `cache_configuration`。这统一结构和生命周期，尚未统一 MemGen 的 sector/known-byte 有效性和 lazy write allocation；TileGen仍为128 B fill/RFO，写回每请求32 B。此档不表示硬件精度已校准。历史报告的64 KiB/全相联结果保持原样。
+前者不执行 GPU issue、warp overlap、MSHR 时序或 GPU completion；它只能产出以明确 cache policy 和 serial caller order 为条件的功能性流量。后者保留这些调度/依赖语义，但当前 Qwen P32D2 工件只完成 importer/input check，不是已经完成的完整 GPU/HBFSim 运行。
 
-以 C 最新原生运行时为唯一源码基线，复用 A 正式版与 C 同源的原生访存规则。
-同一套 Model、Prepared、binding / Builder 提供快速缓存后地址流和 HBFSIM cosimulation。
-所有写回请求均为 **32 B**；读填充及 store RFO 仍为 **128 B**。
+请先读 [ProgramGraph 功能流量工作流、证据和 32 B 状态](docs/programgraph-functional-workflow.md)。其中给出了项目组织、可复现门禁、与 pure GTSim 的简化边界，以及 P64D2 的历史硬件对照。本文后续内容是历史 native-trace / HBFSim 融合记录，**不是本分支当前 Qwen ProgramGraph 的运行指南**。
+
+下文保留历史融合分支记录。
 
 最新衔接：GEMV、SiLU 的 direct binding 与精确 cosim Builder 已共用 cache 前 `PreparedMemory`，并减少等价 CTA 校验的主机分配。三组配对测试中引擎执行窗口为 **1.08×**，完整子进程 CPU 时间基本持平；不能据此声称端到端明显提速。实现、验收和范围见 [共享前端报告](docs/shared-frontend.md)。
 

@@ -1,4 +1,12 @@
-# Qwen2.5-1.5B TileGen + HBFSim 全耦合与 TileGraph 构建、校准流程
+# 历史 Qwen2.5-1.5B TileGen + HBFSim 全耦合与 TileGraph 构建、校准流程
+
+> **定位（2026-10-01）。** 本文保留 `codex/qwen15-full-cosim-20260929-r1` 的历史 full-cosimulation 证据与术语；它不是当前 `codex/qwen15-tilegraph-cosim-20261001` 的默认执行路径。当前 worktree 对固定 P/D 的可批量执行路径是 ProgramGraph 的功能 cache 流量投影；入口、项目组织、32 B cache/trace 限制和 P64D2 对照见 [ProgramGraph 功能流量工作流](programgraph-functional-workflow.md)。
+
+> **不要误读。** TileGraph 仍是 pure GTSim 语义所需的输入结构；当前 Qwen P32D2 TileGraph 已通过输入检查，但尚未以此文定义的完整方式执行 GPU、HBFSim 或硬件校准。因此本文中的 full-cosimulation 定义不能被套用于 ProgramGraph 的流量结果。
+
+## 保留文档的原始范围
+
+以下内容记录历史分支的实现与证据，未因当前分支的 ProgramGraph 路径而改写。
 
 ## 1. 文档目的与当前结论
 
