@@ -40,9 +40,22 @@ target_compile_definitions(tilegen_native PRIVATE TILEGEN_DIRTY_SECTOR_MODE=2)
 target_compile_options(tilegen_native PRIVATE -Wall -Wextra)
 target_link_libraries(tilegen_native PRIVATE ZLIB::ZLIB Threads::Threads)
 
+add_executable(tilegraph_input_check source/tilegraph_input_check.cpp)
+target_include_directories(tilegraph_input_check PRIVATE
+  source
+  source/work/tilegen-full-r1/core-native-copy-r2/include
+  source/work/gddr6-support/delivery-stage/sources/third_party/gtsim-prepared/third_party
+)
+target_compile_definitions(tilegraph_input_check PRIVATE TILEGEN_DIRTY_SECTOR_MODE=2)
+target_compile_options(tilegraph_input_check PRIVATE -Wall -Wextra)
+target_link_libraries(tilegraph_input_check PRIVATE ZLIB::ZLIB Threads::Threads)
+
 # The replay executable links the existing HBFSIM sources, but no GPU simulator TUs.
 get_target_property(TILEGEN_INCLUDES tilegen_native INCLUDE_DIRECTORIES)
 get_target_property(TILEGEN_SOURCES tilegen_native SOURCES)
+target_include_directories(tilegraph_input_check PRIVATE ${TILEGEN_INCLUDES})
+list(FILTER TILEGEN_SOURCES EXCLUDE REGEX "/canonical-full-runtime-r4/streaming\\.cpp$")
+target_sources(tilegraph_input_check PRIVATE ${TILEGEN_SOURCES})
 set(REPLAY_HBFSIM_SOURCES ${TILEGEN_SOURCES})
 list(FILTER REPLAY_HBFSIM_SOURCES INCLUDE REGEX "/hbfsim-latest/")
 add_executable(tilegen_replay source/trace_replay_main.cpp ${REPLAY_HBFSIM_SOURCES})

@@ -6,7 +6,7 @@ TileGraph 是 TileGen 的 tile-level 输入表示。一个模板包含节点、�
 
 生成器是 `llm/tools/qwen15_tilelang_tilegraph.py`。它只读取其自身的模型常数并调用 TileLang 编译器；不读取 CUDA trace、NVBit、NCU、硬件结果、校准参数或 SGLang 运行时输出。源码参考树为 `/home/xmu/nvidiagds/simulators/tilelang`；执行时应使用一个可导入 TileLang 的 Python 运行时。当前服务器使用 `/home/xmu/sgl/bin/python3`。源码树缺少本地 `build/lib`，因此它作为前端参考；实际 TIR 由已安装的 TileLang 编译运行时生成。
 
-1030 是明确的 P32D2 场景基数合同，而非从真实 trace 推断的 runtime census：prefill 388，decode_1 321，decode_2 321。输出的 `cardinality_contract.meaning` 固定这一边界。每个 kernel 实例通过 `template_id` 指向一个 TIR 生成或直接构造的模板，并显式列出向后的数据和顺序依赖。`TILEGEN_TILELANG_TILEGRAPH_INPUT_V1` 和 `input_status=TILEGRAPH_INPUT_READY` 表示它可被 TileGen 的 TileGraph 前端消费；它不表示现有的 `tilegen_native` 已能读取该 JSON。该二进制目前只接受旧的压缩 native 程序传输，因此后续接入工作应是为既有 `KernelBinding` 添加这个格式的 reader，而不是采集或校准真实 trace。
+1030 是明确的 P32D2 场景基数合同，而非从真实 trace 推断的 runtime census：prefill 388，decode_1 321，decode_2 321。输出的 `cardinality_contract.meaning` 固定这一边界。每个 kernel 实例通过 `template_id` 指向一个 TIR 生成或直接构造的模板，并显式列出向后的数据和顺序依赖。`TILEGEN_TILELANG_TILEGRAPH_INPUT_V1` 和 `input_status=TILEGRAPH_INPUT_READY` 表示它可被 TileGen 的 TileGraph 前端消费。`tilegraph_input_check` 通过既有 `tiny_full::KernelBinding` 和 `import_program` 读取该 JSON：它展开 TIR 的循环携带边、导入每个模板，并检查全部 1030 个 kernel 的模板引用和向后依赖。该检查不运行 GPU 或 HBFSim。`tilegen_native` 仍只接受旧的压缩 native 程序传输；将该 reader 接到完整 HBFSim 调度器是后续集成工作，而不是 trace 采集或校准。
 
 示例（输出目录必须是新目录，避免覆盖任何历史证据）：
 
@@ -15,4 +15,7 @@ TileGraph 是 TileGen 的 tile-level 输入表示。一个模板包含节点、�
   --output /home/xmu/nvidiagds/.codex-runs/qwen15-tilegraph-cosim-20261001/tilegraph-qwen-p32d2.json
 /home/xmu/sgl/bin/python3 llm/tools/qwen15_tilelang_tilegraph.py \
   --check /home/xmu/nvidiagds/.codex-runs/qwen15-tilegraph-cosim-20261001/tilegraph-qwen-p32d2.json
+cmake --build /home/xmu/nvidiagds/.codex-runs/qwen15-tilegraph-cosim-20261001/build --target tilegraph_input_check -j2
+/home/xmu/nvidiagds/.codex-runs/qwen15-tilegraph-cosim-20261001/build/tilegraph_input_check \
+  /home/xmu/nvidiagds/.codex-runs/qwen15-tilegraph-cosim-20261001/tilegraph-qwen-p32d2.json
 ```
