@@ -36,8 +36,9 @@ class Binding final:public KernelBinding {
     std::vector<SourceNode> nodes_;
     unsigned warps_=0;
     J evidence_;
+    U address_base_=0;
 public:
-    explicit Binding(const J& templ) {
+    explicit Binding(const J& templ, U address_base=0):address_base_(address_base) {
         const auto& local=templ.at("nodes");
         need(local.is_array()&&!local.empty(),"template has no nodes");
         const auto iterations=templ.contains("loop")?p::natural(templ.at("loop").at("iterations")):U(1);
@@ -53,7 +54,7 @@ public:
             const auto& input=local.at(local_id);SourceNode node;
             node.id=unsigned(nodes_.size());node.source_ordinal=local_id;node.warp=unsigned(p::natural(input.at("execution_group")));
             node.ordinal=ordinal.at(node.warp)++;node.kind=kind(input.at("kind").get<std::string>());node.pipeline=input.at("pipeline").get<std::string>();
-            node.write=input.at("write").get<bool>();node.compute_elements=p::natural(input.value("compute_elements",U(0)));node.tensor_fma=p::natural(input.value("tensor_fma",U(0)));nodes_.push_back(std::move(node));
+            node.write=input.at("write").get<bool>();node.compute_elements=p::natural(input.value("compute_elements",U(0)));node.tensor_fma=p::natural(input.value("tensor_fma",U(0)));node.memory_bytes=p::natural(input.value("tile_bytes",U(0)));node.memory_offset=p::natural(input.value("memory_offset",U(0)));node.memory_buffer=input.value("memory_buffer",std::string{});nodes_.push_back(std::move(node));
         }
         for(const auto& edge:templ.at("edges")) {
             const auto from=unsigned(p::natural(edge.at("from"))),to=unsigned(p::natural(edge.at("to")));need(from<local.size()&&to<local.size(),"template edge endpoint range");
@@ -77,10 +78,11 @@ public:
         need(node.kind==Kind::Global||node.kind==Kind::Shared,"not a memory node");MemoryDescriptor descriptor;descriptor.write=node.write;
         descriptor.path=node.kind==Kind::Global?tiny_full::Path::DirectGlobal:tiny_full::Path::Shared;
         if(node.kind==Kind::Global) {
-            const U offset=(U(node.id)+1)*128;descriptor.global_bytes=128;
-            descriptor.lines.push_back(g::CacheLineKey{1,offset});g::ExplicitMemorySubop sub;
-            sub.modeled_member_start=int(node.id);sub.source_member_ordinals.push_back(int(node.id));sub.requested_bytes=128;
-            sub.ranges.push_back({int(node.id),offset,128});descriptor.global_subops.push_back(std::move(sub));
+            const U bytes=node.memory_bytes?node.memory_bytes:128;
+            const U offset=address_base_+node.memory_offset+U(node.id)*128;descriptor.global_bytes=bytes;
+            for(U line=0;line<bytes;line+=128) descriptor.lines.push_back(g::CacheLineKey{1,offset+line});g::ExplicitMemorySubop sub;
+            sub.modeled_member_start=int(node.id);sub.source_member_ordinals.push_back(int(node.id));sub.requested_bytes=bytes;
+            sub.ranges.push_back({int(node.id),offset,bytes});descriptor.global_subops.push_back(std::move(sub));
         }
         return descriptor;
     }
@@ -104,14 +106,12 @@ int run_full(const char* graph_path,const char* control_path) {
     need(graph.at("schema")=="TILEGEN_TILELANG_TILEGRAPH_INPUT_V1"&&graph.at("kernels").size()==1030,"full TileGraph contract");
     need(control.contains("memory_model")&&control.contains("service_address_map"),"full run memory control");
     std::map<std::string,const J*> templates;for(const auto& item:graph.at("templates"))templates.emplace(item.at("template_id").get<std::string>(),&item);
-    std::map<std::string,std::shared_ptr<Binding>> bindings;
-    for(const auto& item:templates)bindings.emplace(item.first,std::make_shared<Binding>(*item.second));
     auto cfg=GTSim::make_rtx4000_ada_footprint_reference_config();cfg.silence_mode=true;cfg.workload_type=g::WorkloadType::Llama3Elementwise;
     native_sequence::Mapper source_mapper;coupling::Runtime memory(control,cfg,source_mapper);need(bool(memory.backend),"full run requires native HBF backend");
     auto l2=tiny_full::make_l2(cfg,memory);g::Cycle cycle=0;hybrid_full::FineContext session(cfg,*l2,cycle);
     U total_read=0,total_write=0,total_nodes=0;const auto started=std::chrono::steady_clock::now();
     for(std::size_t index=0;index<graph.at("kernels").size();++index) {
-        const auto& kernel=graph.at("kernels").at(index);const auto& binding=*bindings.at(kernel.at("template_id").get<std::string>());g::DAG dag;
+        const auto& kernel=graph.at("kernels").at(index);Binding binding(*templates.at(kernel.at("template_id").get<std::string>()),p::natural(kernel.at("address_base")));g::DAG dag;
         const auto nodes=binding.nodes(0);std::vector<std::unique_ptr<g::DAGNode>> owners;owners.reserve(nodes.size());
         for(const auto& source:nodes) {
             std::vector<int> completion;for(const auto dep:source.completion_dependencies)completion.push_back(int(dep));

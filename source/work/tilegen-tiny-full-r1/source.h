@@ -15,6 +15,8 @@ struct SourceNode {
     Kind kind=Kind::Compute;
     std::string pipeline;
     bool write=false;
+    U memory_bytes=0, memory_offset=0;
+    std::string memory_buffer;
     std::vector<unsigned> completion_dependencies, issue_dependencies;
 };
 struct MemoryDescriptor {

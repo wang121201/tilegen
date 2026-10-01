@@ -83,10 +83,10 @@ def gemm_template(name: str, m: int, n: int, k: int) -> dict[str, Any]:
     tile = launch["tile_shape"]
     tile_bytes = tile["m"] * tile["k"] * MODEL["bytes_per_element"]
     nodes = [
-        {"id": 0, "kind": "Global", "execution_group": 0, "pipeline": "LD", "operation": "tile_load_a", "tile_bytes": tile_bytes, "write": False},
-        {"id": 1, "kind": "Global", "execution_group": 1, "pipeline": "LD", "operation": "tile_load_b", "tile_bytes": tile_bytes, "write": False},
+        {"id": 0, "kind": "Global", "execution_group": 0, "pipeline": "LD", "operation": "tile_load_a", "tile_bytes": tile_bytes, "memory_buffer": "weight_a", "memory_offset": 0, "write": False},
+        {"id": 1, "kind": "Global", "execution_group": 1, "pipeline": "LD", "operation": "tile_load_b", "tile_bytes": tile_bytes, "memory_buffer": "weight_b", "memory_offset": 1 << 20, "write": False},
         {"id": 2, "kind": "Tensor", "execution_group": 0, "pipeline": "Tensor", "operation": "gemm", "tensor_fma": tile["m"] * tile["n"] * tile["k"], "write": False},
-        {"id": 3, "kind": "Global", "execution_group": 0, "pipeline": "ST", "operation": "tile_store_c", "tile_bytes": tile["m"] * tile["n"] * MODEL["bytes_per_element"], "write": True},
+        {"id": 3, "kind": "Global", "execution_group": 0, "pipeline": "ST", "operation": "tile_store_c", "tile_bytes": tile["m"] * tile["n"] * MODEL["bytes_per_element"], "memory_buffer": "activation_c", "memory_offset": 2 << 20, "write": True},
     ]
     edges = [
         {"from": 0, "to": 2, "type": "data"},
@@ -110,9 +110,9 @@ def gemm_template(name: str, m: int, n: int, k: int) -> dict[str, Any]:
 def direct_template(name: str, operation: str) -> dict[str, Any]:
     """Direct TileGraph construction for vector/control kernels allowed by the paper."""
     nodes = [
-        {"id": 0, "kind": "Global", "execution_group": 0, "pipeline": "LD", "operation": operation + "_read", "tile_bytes": 4096, "write": False},
+        {"id": 0, "kind": "Global", "execution_group": 0, "pipeline": "LD", "operation": operation + "_read", "tile_bytes": 4096, "memory_buffer": operation + "_input", "memory_offset": 0, "write": False},
         {"id": 1, "kind": "Compute", "execution_group": 0, "pipeline": "SIMD", "operation": operation, "compute_elements": 2048, "write": False},
-        {"id": 2, "kind": "Global", "execution_group": 0, "pipeline": "ST", "operation": operation + "_write", "tile_bytes": 2048, "write": True},
+        {"id": 2, "kind": "Global", "execution_group": 0, "pipeline": "ST", "operation": operation + "_write", "tile_bytes": 2048, "memory_buffer": operation + "_output", "memory_offset": 1 << 20, "write": True},
     ]
     return {
         "template_id": name,
@@ -164,7 +164,7 @@ DECODE_LAYER = [
 
 def append_kernel(kernels: list[dict[str, Any]], phase: str, layer: int | None, operation: str, template_id: str) -> None:
     kernel_id = len(kernels)
-    item: dict[str, Any] = {"kernel_id": kernel_id, "phase": phase, "layer": layer, "operation": operation, "template_id": template_id, "data_dependencies": [], "order_dependencies": []}
+    item: dict[str, Any] = {"kernel_id": kernel_id, "phase": phase, "layer": layer, "operation": operation, "template_id": template_id, "address_base": kernel_id * (8 << 20), "data_dependencies": [], "order_dependencies": []}
     if kernels:
         item["data_dependencies"].append(kernel_id - 1)
         item["order_dependencies"].append(kernel_id - 1)
