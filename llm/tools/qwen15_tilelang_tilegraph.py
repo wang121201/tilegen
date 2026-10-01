@@ -29,6 +29,10 @@ MODEL = {
     "bytes_per_element": 2,
 }
 WORKLOAD = {"name": "P32D2", "batch_size": 1, "prefill_tokens": 32, "decode_steps": 2}
+# This is a packed source-address namespace for the cache/HBFSim service map.
+# It is not a CUDA virtual-address capture or a hardware-calibrated mapping.
+KERNEL_ADDRESS_STRIDE_BYTES = 15 << 20
+CTA_ADDRESS_STRIDE_BYTES = 3 << 20
 
 
 def fail(condition: bool, message: str) -> None:
@@ -123,6 +127,49 @@ def direct_template(name: str, operation: str) -> dict[str, Any]:
     }
 
 
+def launch_contract(phase: str, template_id: str) -> dict[str, Any]:
+    """Return the explicit full-grid contract for one abstract kernel.
+
+    GEMM contracts are copied from the TileLang TIR launch geometry. The
+    direct descriptors do not have a TIR launch, so their grids are derived
+    from the P32D2 tensor shape and the fixed vector decomposition below.
+    These are executable model assumptions, not profiler or trace data.
+    """
+    prefill = phase == "prefill"
+    if template_id == "control_phase":
+        return {"grid": {"x": 1, "y": 1, "z": 1}, "threads": 128,
+                "resident_cta_limit": 4, "basis": "analytic_control_boundary"}
+    if template_id == "vector_rmsnorm":
+        return {"grid": {"x": 32 if prefill else 1, "y": 1, "z": 1}, "threads": 192,
+                "resident_cta_limit": 4, "basis": "P32D2_rows_x_6_warps"}
+    if template_id == "vector_rope":
+        return {"grid": {"x": 4 if prefill else 1, "y": 14, "z": 1}, "threads": 128,
+                "resident_cta_limit": 4, "basis": "P32D2_rope_rows_x_kv_heads"}
+    if template_id == "vector_softmax":
+        return {"grid": {"x": 12, "y": 1, "z": 1}, "threads": 128,
+                "resident_cta_limit": 4, "basis": "12_attention_heads"}
+    if template_id == "vector_swiglu":
+        return {"grid": {"x": 32 if prefill else 1, "y": 1, "z": 1}, "threads": 128,
+                "resident_cta_limit": 4, "basis": "P32D2_rows"}
+    if template_id == "vector_residual":
+        return {"grid": {"x": 32 if prefill else 1, "y": 1, "z": 1}, "threads": 128,
+                "resident_cta_limit": 4, "basis": "P32D2_rows"}
+    gemm_grid = {
+        "qkv_prefill": (16, 1, 1), "qkv_decode": (16, 1, 1),
+        "projection_prefill": (12, 1, 1), "projection_decode": (12, 1, 1),
+        "ffn_gate_up_prefill": (70, 1, 1), "ffn_gate_up_decode": (70, 1, 1),
+        "ffn_down_prefill": (12, 1, 1), "ffn_down_decode": (12, 1, 1),
+        "attention_score_prefill": (1, 1, 1), "attention_value_prefill": (1, 1, 1),
+        "attention_score_decode": (1, 1, 1), "attention_value_decode": (1, 1, 1),
+    }
+    if template_id in gemm_grid:
+        x, y, z = gemm_grid[template_id]
+        return {"grid": {"x": x, "y": y, "z": z}, "threads": 128,
+                "pipeline_stages": 3, "resident_cta_limit": 4,
+                "basis": "compiler_generated_tilelang_tir_launch"}
+    raise ValueError(f"missing launch contract for {template_id}")
+
+
 def templates() -> list[dict[str, Any]]:
     h, f, p = MODEL["hidden_size"], MODEL["intermediate_size"], WORKLOAD["prefill_tokens"]
     return [
@@ -164,7 +211,7 @@ DECODE_LAYER = [
 
 def append_kernel(kernels: list[dict[str, Any]], phase: str, layer: int | None, operation: str, template_id: str) -> None:
     kernel_id = len(kernels)
-    item: dict[str, Any] = {"kernel_id": kernel_id, "phase": phase, "layer": layer, "operation": operation, "template_id": template_id, "address_base": kernel_id * (8 << 20), "data_dependencies": [], "order_dependencies": []}
+    item: dict[str, Any] = {"kernel_id": kernel_id, "phase": phase, "layer": layer, "operation": operation, "template_id": template_id, "address_base": kernel_id * KERNEL_ADDRESS_STRIDE_BYTES, "launch": launch_contract(phase, template_id), "data_dependencies": [], "order_dependencies": []}
     if kernels:
         item["data_dependencies"].append(kernel_id - 1)
         item["order_dependencies"].append(kernel_id - 1)
@@ -197,12 +244,23 @@ def validate(graph: dict[str, Any]) -> dict[str, Any]:
     fail(len(templates_by_id) == len(graph.get("templates", [])), "template ids are not unique")
     kernels = graph.get("kernels", [])
     fail(len(kernels) == 1030, "expected exactly 1030 kernels")
+    layout = graph.get("address_layout", {})
+    fail(layout.get("schema") == "TILEGRAPH_PACKED_SOURCE_ADDRESS_LAYOUT_V1", "missing packed source address layout")
+    fail(layout.get("kernel_stride_bytes") == KERNEL_ADDRESS_STRIDE_BYTES, "unexpected kernel address stride")
+    fail(layout.get("cta_stride_bytes") == CTA_ADDRESS_STRIDE_BYTES, "unexpected CTA address stride")
     expected = {"prefill": 388, "decode_1": 321, "decode_2": 321}
     actual = Counter(item.get("phase") for item in kernels)
     fail(dict(actual) == expected, f"phase counts differ: {dict(actual)}")
     for index, kernel in enumerate(kernels):
         fail(kernel.get("kernel_id") == index, "kernel ids must be dense")
+        fail(kernel.get("address_base") == index * KERNEL_ADDRESS_STRIDE_BYTES, "kernel address bases must use the packed source layout")
         fail(kernel.get("template_id") in templates_by_id, "kernel refers to unknown template")
+        launch = kernel.get("launch", {})
+        fail(isinstance(launch, dict) and isinstance(launch.get("grid"), dict), "kernel launch contract is required")
+        grid = launch["grid"]
+        fail(all(isinstance(grid.get(axis), int) and grid[axis] > 0 for axis in ("x", "y", "z")), "launch grid must be positive")
+        fail(isinstance(launch.get("threads"), int) and 1 <= launch["threads"] <= 1024, "launch thread count is out of range")
+        fail(launch.get("resident_cta_limit") == 4, "standard full cosimulation requires resident_cta_limit=4")
         for dependency in kernel.get("data_dependencies", []) + kernel.get("order_dependencies", []):
             fail(isinstance(dependency, int) and 0 <= dependency < index, "dependencies must be backward kernel ids")
     for template in templates_by_id.values():
@@ -227,6 +285,7 @@ def generate() -> dict[str, Any]:
         "workload": WORKLOAD,
         "tilelang": {"python_module": str(pathlib.Path(tilelang.__file__).resolve()), "compiler_source_reference": "/home/xmu/nvidiagds/simulators/tilelang", "source_tree_role": "frontend_reference", "runtime_role": "installed_compiler_runtime"},
         "cardinality_contract": {"total_kernels": 1030, "phase_counts": {"prefill": 388, "decode_1": 321, "decode_2": 321}, "meaning": "Explicit P32D2 TileGraph scenario cardinality; it is not inferred from a hardware or runtime trace."},
+        "address_layout": {"schema": "TILEGRAPH_PACKED_SOURCE_ADDRESS_LAYOUT_V1", "kernel_stride_bytes": KERNEL_ADDRESS_STRIDE_BYTES, "cta_stride_bytes": CTA_ADDRESS_STRIDE_BYTES, "local_node_offset_bytes": "memory_offset + expanded_node_id * 128", "qualification": "Packed source namespace for cache/HBFSim service routing; synthetic, non-CUDA, and not hardware-calibrated."},
         "templates": templates(),
         "kernels": build_kernels(),
     }
