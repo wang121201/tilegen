@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <memory>
+#include <functional>
 #include <ostream>
 #include <set>
 
@@ -25,6 +26,7 @@ inline J configuration(){return {{"L1",llm_l1::description(l1_config(),llm_l1::a
 inline J difference(const J& a,const J& b){J r=J::object();for(auto i=b.begin();i!=b.end();++i)if(i.key().find("fnv")==std::string::npos&&i.key().find("resident")==std::string::npos&&i.key().find("capacity")==std::string::npos&&i.key()!="dirty_tail_bytes"&&i.value().is_number_unsigned()&&a.contains(i.key())&&a.at(i.key()).is_number_unsigned()){U x=a.at(i.key()).get<U>(),y=i.value().get<U>();need(y>=x,"cumulative counter regressed");r[i.key()]=y-x;}return r;}
 struct Effect {std::string operation;U cta=0,warp=0,pc=0,width=0,effective=0,global_mask=0;std::array<U,32> addresses{};};
 struct Policy {bool bypass=false,low_priority=false;std::string semantic="other";};
+inline std::function<void(const native_trace::Record&)> postcache_stream_observer;
 class Runner {
  std::ostream& out_;std::unique_ptr<direct_native::FunctionalCache> cache_;
  bool started_=false,ended_=false,open_=false,is_api_=false,current_write_=false,current_atomic_=false;
@@ -69,7 +71,7 @@ class Runner {
  }
 public:
  explicit Runner(std::ostream& out):out_(out){cache_=std::make_unique<direct_native::FunctionalCache>(l1_config(),40ULL<<20,[](int matrix,U a){need(matrix==0,"global VA namespace");return a;},[this](const native_trace::Record& r){
-   need(r.bytes==(r.cause==native_trace::Cause::DirtyWriteback?32:selected_data_policy()==direct_native::DataPolicy::SECTOR32?32:128),"cache transaction size changed");for(U n:native_trace::words(r))hash(post_hash_,n);
+   need(r.bytes==(r.cause==native_trace::Cause::DirtyWriteback?32:selected_data_policy()==direct_native::DataPolicy::SECTOR32?32:128),"cache transaction size changed");for(U n:native_trace::words(r))hash(post_hash_,n);if(postcache_stream_observer)postcache_stream_observer(r);
   },GTSim::L2GeometryConfig::paper_ada_l2_v1(),options(),direct_native::OwnerObserver{},[this](const auto& o,const auto& c,auto reason,std::uint32_t mask){account_writeback(o,c,reason,mask);});last_snapshot_=snapshot();}
  J dirty_distribution()const{J v=cache_->dirty_group_observation();v.erase("resident_dirty_lines_by_group");return v;}
  J snapshot()const{J s=cache_->snapshot();s["L1_adapter_observation"]=cache_->l1_observation();s["source_warp_events"]=memory_events_;s["zero_global_effect_events"]=zero_events_;s["source_kernel_payload_bytes_once"]=kernel_payload_;s["source_API_payload_bytes"]=api_payload_;s["source_read_effect_bytes"]=read_effect_;s["source_write_effect_bytes"]=write_effect_;s["source_atomic_RMW_events"]=atomic_events_;s["source_global_to_shared_events"]=g2s_events_;s["API_ranges"]=api_ranges_;s["API_128B_chunks"]=api_chunks_;s["kernel_boundaries"]=kernels_;s["API_boundaries_without_cache_flush"]=apis_;s["source_effect_projection_fnv1a64"]=source_hash_;s["postcache_record_fnv1a64"]=post_hash_;s["dirty_tail_bytes"]=s.at("resident_dirty_sectors").get<U>()*32;

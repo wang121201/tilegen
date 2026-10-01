@@ -51,6 +51,13 @@ target_compile_definitions(tilegen_replay PRIVATE TILEGEN_DIRTY_SECTOR_MODE=2)
 target_compile_options(tilegen_replay PRIVATE -Wall -Wextra)
 target_link_libraries(tilegen_replay PRIVATE ZLIB::ZLIB Threads::Threads)
 
+# TileGen-owned post-cache service adapter. HBFSim sources are linked unchanged; no HBFSim edits.
+add_executable(programgraph_hbfsim_service source/programgraph_hbfsim_service_main.cpp ${REPLAY_HBFSIM_SOURCES})
+target_include_directories(programgraph_hbfsim_service PRIVATE source ${TILEGEN_INCLUDES})
+target_compile_definitions(programgraph_hbfsim_service PRIVATE TILEGEN_DIRTY_SECTOR_MODE=2)
+target_compile_options(programgraph_hbfsim_service PRIVATE -Wall -Wextra)
+target_link_libraries(programgraph_hbfsim_service PRIVATE ZLIB::ZLIB Threads::Threads)
+
 include(CTest)
 if(BUILD_TESTING)
   get_target_property(TILEGEN_INCLUDES tilegen_native INCLUDE_DIRECTORIES)

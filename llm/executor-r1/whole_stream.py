@@ -535,6 +535,10 @@ def main():
     for name in ('graph', 'registry', 'runtime', 'output'):
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--runner', type=Path)
+    parser.add_argument('--runner-range-output', type=Path,
+                        help='TileGen-owned post-cache range sink; no direct memory trace is retained')
+    parser.add_argument('--phase-scope', choices=('complete', 'measured-only'), default='complete',
+                        help='Execute the complete graph or only Measured/Prefill..Decode phases with a cold cache')
     parser.add_argument('--launch-resources', type=Path,
                         help='Graph-SHA-bound per-launch observed shared/L1 carveout; no inference from dynamic shared')
     parser.add_argument('--preflight-only', action='store_true')
@@ -553,6 +557,9 @@ def main():
     args = parser.parse_args()
     age_expectation = dirty_age_expectation(args.expected_dirty_age_accesses, args.expected_dirty_age_clock)
     need(not args.output.exists(), 'fresh result directory required')
+    if args.runner_range_output:
+        need(not args.runner_range_output.exists() or args.runner_range_output.is_fifo(),
+             'fresh runner range output required (or a FIFO)')
     args.output.mkdir(parents=True)
     start, cpu_start = time.monotonic(), time.process_time()
     source_pins = {name: pin(getattr(args, name)) for name in ('graph', 'registry', 'runtime')}
@@ -586,6 +593,7 @@ def main():
                  source_hint_interpretation={'EF': 'fixed_h288', 'EL': 'explicitly_modeled_as_normal_priority'},
                  splitK_schedule='serial_parts_then_tiles_one_poll_per_warp_after_predecessor_publish',
                  compute_stall_cosimulation=False, hardware_warp_schedule_claimed=False,
+                 execution_scope=args.phase_scope,
                  DMA_model='L2_COHERENT_FUNCTIONAL_128B_CHUNKS', terminal_dirty_flush=args.drain_policy == 'run-end',
                  drain_policy=args.drain_policy,
                  **age_expectation,
@@ -605,9 +613,23 @@ def main():
                 if schema in schemas:
                     extra_runtime_pins.extend(pin(p) for p in sorted((K/directory).iterdir()) if p.is_file() and p.suffix in ('.py', '.json', '.h'))
         timeline, receipt = preflight(graph, entries)
+        if args.phase_scope == 'measured-only':
+            selected = [p for p in receipt['phases'] if p.startswith('Measured/')]
+            timeline = [(ordinal, kind, payload) for ordinal, kind, payload in timeline
+                        if (kind == 'node' and
+                            (payload.get('kind') == 'allocation_API_observation' or payload.get('phase') in selected))
+                        or (kind.startswith('phase_') and payload in selected)]
+            need(any(kind == 'node' for _, kind, _ in timeline), 'measured-only scope selected no kernels')
+            receipt = dict(receipt, phases=selected, execution_scope='MEASURED_ONLY_COLD_CACHE',
+                           selected_kernel_count=sum(kind == 'node' and payload['kind'] == 'native_kernel'
+                                                     for _, kind, payload in timeline),
+                           complete_graph_validated=True)
         if launch_resources is not None:
             expected = {n['native_launch_id'] for _, kind, n in timeline if kind == 'node' and n['kind'] == 'native_kernel'}
-            need(set(launch_resources) == expected, 'observed launch resources must cover complete initialization/warmup/measured history exactly')
+            if args.phase_scope == 'complete':
+                need(set(launch_resources) == expected, 'observed launch resources must cover complete initialization/warmup/measured history exactly')
+            else:
+                need(expected <= set(launch_resources), 'observed launch resources must cover selected measured kernels')
         state['input_preflight'] = receipt
         state['status'] = 'PASS_COMPLETE_NATIVE_INPUT_PREFLIGHT'
         write_state()
@@ -616,10 +638,15 @@ def main():
         need(args.runner and args.runner.is_file(), 'real cache binary is required')
         state['cache_runner'] = pin(args.runner)
         with (args.output / 'runner.stdout').open('wb') as stdout, (args.output / 'runner.stderr').open('wb') as stderr, (args.output / 'progress.jsonl').open('w') as journal:
-            process = subprocess.Popen([str(args.runner.resolve()), '--input', '-', '--summary',
+            runner_command = [str(args.runner.resolve()), '--input', '-', '--summary',
                 str((args.output / 'cache-summary.json').resolve()), '--snapshots',
-                str((args.output / 'cache-snapshots.jsonl').resolve())], stdin=subprocess.PIPE, stdout=stdout, stderr=stderr)
+                str((args.output / 'cache-snapshots.jsonl').resolve())]
+            if args.runner_range_output:
+                runner_command.extend(['--range-output', str(args.runner_range_output.resolve())])
+            process = subprocess.Popen(runner_command, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr)
             state.update(status='RUNNING_COMPLETE_NATIVE_GRAPH_CACHE', runner_pid=process.pid)
+            if args.runner_range_output:
+                state['postcache_range_output'] = str(args.runner_range_output.resolve())
             write_state()
             send = Writer(process.stdin)
             def progress(row):
@@ -652,15 +679,19 @@ def main():
                 label = key[:-len('/begin')]
                 drains.append(phase_traffic(label, observations[key], observations[label + '/end']))
         (args.output / 'phase-traffic.json').write_text(json.dumps(dict(
-            status='PASS_COMPLETE_SMOKE_PHASE_TRAFFIC', input_contract=graph.value['input_contract'],
+            status='PASS_COMPLETE_SMOKE_PHASE_TRAFFIC' if args.phase_scope == 'complete'
+                   else 'PASS_MEASURED_SMOKE_PHASE_TRAFFIC', input_contract=graph.value['input_contract'],
             model_only=True, NCU_accuracy_claimed=False, phase_rows=phases, diagnostic_drain_rows=drains,
             drain_policy=args.drain_policy, measured_cache_history_intervened=args.drain_policy == 'measured-phase-end',
             diagnostic_drains_are_native_operations=False,
             source_stream_without_drain_interventions=state['source_stream_without_drain_interventions'],
             actual_cache_configuration=state['actual_cache_configuration'],
             **age_expectation,
-            DMA_model=state['DMA_model'], source_stream=state['source_stream']), indent=2) + '\n')
-        state.update(status='PASS_COMPLETE_NATIVE_GRAPH_CACHE_EXECUTION', cache_replay=True)
+            DMA_model=state['DMA_model'], source_stream=state['source_stream'],
+            execution_scope=args.phase_scope), indent=2) + '\n')
+        state.update(status='PASS_COMPLETE_NATIVE_GRAPH_CACHE_EXECUTION' if args.phase_scope == 'complete'
+                     else 'PASS_MEASURED_NATIVE_GRAPH_CACHE_EXECUTION', cache_replay=True,
+                     execution_scope=args.phase_scope)
     except BaseException as exc:
         state.update(status='FAIL_NATIVE_GRAPH_EXECUTION', error_type=type(exc).__name__, error=str(exc))
         if process is not None and process.poll() is None:

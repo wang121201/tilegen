@@ -1,0 +1,5 @@
+#pragma once
+#include "native_trace.h"
+#include <fstream>
+#include <optional>
+namespace source_cache { class RangeEmitter { std::ofstream out_; std::optional<native_trace::Record> pending_; std::uint64_t bytes_=0; void flush(){if(!pending_)return;const auto&r=*pending_;out_<<nlohmann::json{{"schema","PROGRAMGRAPH_POSTCACHE_RANGE_V1"},{"source_address",r.service_address},{"bytes",bytes_},{"write",r.cause==native_trace::Cause::DirtyWriteback},{"sector_count",bytes_/32}}.dump()<<'\n';pending_.reset();bytes_=0;} public: explicit RangeEmitter(const std::string& p){if(!p.empty()){out_.open(p);native_trace::need(bool(out_),"range output open");}} void accept(const native_trace::Record&r){if(!out_)return;native_trace::need(r.bytes==32,"range emitter requires sector32");if(pending_){const auto&p=*pending_;const bool same=p.cause==r.cause&&p.service_address+bytes_==r.service_address&&bytes_+r.bytes<=128&&p.service_address%128+bytes_+r.bytes<=128;if(!same)flush();}if(!pending_)pending_=r;bytes_+=r.bytes;} void finish(){if(!out_)return;flush();out_.flush();native_trace::need(bool(out_),"range output write");}}; }

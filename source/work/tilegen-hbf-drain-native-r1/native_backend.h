@@ -170,7 +170,8 @@ class HbfCreditBackend final:public g::L2DramCompletionBackend {
 public:
     static bool valid_native_request_shape(const g::L2DramRequest& r) {
         if (r.cause == g::L2DramRequestCause::FILL_READ)
-            return r.bytes == 128 && r.address % 128 == 0;
+            return r.bytes >= 32 && r.bytes <= 128 && r.bytes % 32 == 0 &&
+                r.address % 32 == 0 && r.bytes <= 128 - (r.address % 128);
         if (r.cause != g::L2DramRequestCause::DIRTY_WRITEBACK) return false;
         if constexpr (g::kTilegenDirtySectorMode == 2)
             return r.bytes >= 32 && r.bytes <= 128 && r.bytes % 32 == 0 &&
